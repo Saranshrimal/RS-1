@@ -1,0 +1,184 @@
+#Load Libraries
+library(terra) 
+library(gdata) 
+library(corrplot)
+library(sf)
+library(pracma)
+library(cluster)
+library(factoextra)
+library(raster)
+
+#Set working Directory
+path <- 'D:/OneDrive - Lamar University/RS Project 1/decade'
+setwd(path)
+
+#Read all the bands
+bands <- c('aerosolx','bluex','greenx','redx','NIRx','SWIR1x','SWIR2x') 
+Nbands <- length(bands)
+
+#Get Ready to Read the BMT vector file
+fname <- 'JeffersonboundaryAEA.gpkg'
+bmt <- vect(fname)
+plot(bmt)
+
+
+#Read the raster and crop
+for(i in seq(1,Nbands,1)){
+  fname <- paste('clippedB',i,'.tif',sep="")
+  x <- rast(fname)
+  x <- crop(x,bmt)
+  mv('x',bands[i])
+}
+
+plot(aerosolx)
+plot(bluex)
+
+#Create a rasterstack 
+jefflsat <- c(aerosolx,bluex,greenx,redx,NIRx,SWIR1x,SWIR2x)
+writeRaster(jefflsat,"jeffersonallbands.TIF",filetype = "GTiff",overwrite = TRUE)
+
+#plot RGB and FCC Plots
+#plot RGB Databands
+plotRGB(jefflsat,r=4,g=3,b=2,stretch='hist')
+
+#Plot False Color Composite with NIR,red,green)
+plotRGB(jefflsat,r=5,g=4,b=3,stretch='hist')
+
+
+# Load the raster stack
+jefflsat <- rast("jeffersonallbands.TIF")
+# Function to compute histogram
+compute_histogram <- function(x) {
+  tab <- table(values(x))
+  df <- as.data.frame(tab)
+  colnames(df) <- c("value", "count")
+  df$count <- df$count / sum(df$count)
+  return(df)
+}
+# Function to perform histogram equalization on a single raster layer
+histogram_equalization <- function(x) {
+  # Compute histogram
+  hist_values <- compute_histogram(x)
+  # Compute cumulative distribution function (CDF)
+  cdf_values <- cumsum(hist_values$count)
+  # Perform histogram equalization
+  eq_values <- round(255 * cdf_values[as.numeric(as.character(values(x)))])
+  # Replace the values in the raster layer with the equalized values
+  result <- init(x, 0)
+  values(result) <- eq_values
+  return(result)
+}
+# Apply histogram equalization to each layer of the raster stack
+jefflsat_eq <- lapply(jefflsat, histogram_equalization)
+# Convert the list of raster objects to a raster stack
+jefflsat_eq_stack <- rast(jefflsat_eq)
+# Plot RGB images before and after equalization
+par(mfrow = c(1, 2))
+plotRGB(jefflsat, r = 4, g = 3, b = 2, stretch = 'hist', main = "Original RGB")
+plotRGB(jefflsat_eq_stack, r = 4, g = 3, b = 2, stretch = 'hist', main = "Equalized RGB")
+
+
+#Create a Boxplot
+bandnames <- c('Aerosol','Blue','Green','Red','NIR','SWIR1','SWIR2')
+f <- boxplot(jefflsat,axes=FALSE,outline=F,ylab='Value',notch=F) 
+axis(1,at=1:(Nbands),labels=bandnames,las=2) 
+axis(2) 
+title('DN for Various Bands in Jefferson')
+grid()
+box() 
+
+# Write the bands as a dataframe for additional analysis
+banddf <- as.data.frame(jefflsat,xy=TRUE,) 
+head(banddf)
+banddf <- na.omit(banddf) 
+colnames(banddf) <- c('X','Y',bandnames) 
+head(banddf)
+
+#Compute correlation between bands
+corbands <- cor(banddf[,3:9],method='spearman') 
+corrplot(corbands,method='number',type='lower',diag=FALSE)
+
+# Clamp Value for contrast enhancement
+LL <- 0.05
+UL <- 0.95
+bandnamec <- c()
+for(i in seq(1,Nbands,1)) {
+  bname <- paste(bands[i],'c',sep="")
+  xmin <- quantile(banddf[,(i+2)],LL,na.rm=T)
+  xmax <- quantile(banddf[,(i+2)],UL,na.rm=T)
+  x <- clamp(jefflsat[[i]],lower=xmin,upper=xmax,values=TRUE)
+  mv('x',bname)
+  bandnamec[i] <- bname
+}
+
+#Plot RGB and FCC image
+lsatjeffc <- c(aerosolxc,bluexc,greenxc,redxc,NIRxc,SWIR1xc,SWIR2xc)
+plotRGB(lsatjeffc,r=4,g=3,b=2,stretch='hist')
+plotRGB(lsatjeffc,r=4,g=3,b=2,stretch='lin')
+
+hist(lsatjeffc)
+
+#create a dataframe
+bandcdf <- as.data.frame(lsatjeffc, xy = TRUE, geom = 'WKT')
+summary(bandcdf)
+bandcdf <- na.omit(bandcdf)
+colnames(bandcdf) <- c("X","Y", bandnames, "WKT") 
+
+#compute correlation between bands
+corbands <- cor(bandcdf[,3:9], method = 'spearman')
+corrplot(corbands, method = 'number', type = 'lower', diag = FALSE)
+
+#Reproject data to lat-lon
+crsaea <- crs(lsatjeffc, proj = T) #Get crs
+crs84 <- 4326 #EPSG code #Define the new crs
+
+banddf.SP <- st_as_sf(banddf, coords = c("X", "Y"), crs = crs84)
+banddf.SP$XAEA = st_coordinates(banddf.SP)[,1]
+banddf.SP$YAEA = st_coordinates(banddf.SP)[,2]
+
+bandcdf.SP <- st_transform(x=banddf.SP, crs = crs84) #reproject
+bandcdf.SP$Lon = st_coordinates(bandcdf.SP)[,1]
+bandcdf.SP$Lat = st_coordinates(bandcdf.SP)[,2]
+
+#create a csv file
+bandcdf.SP <- subset(bandcdf.SP,select=- c(geometry))
+write.csv(bandcdf.SP, 'bandcdf.csv', row.names = F)
+
+#principle component analysis
+# PCA Analysis with bands only
+bancdf.pca <- prcomp(bandcdf[,3:9], scale = TRUE)
+pcadat <- bancdf.pca$x
+#exporting the data into csv file
+write.csv(pcadat,'pcadata.csv', row.names=F)
+# Examine component loadings
+loadings <- bancdf.pca$rotation
+# Print component loadings
+print(loadings)
+
+#Perform Cluster analysis (K-mean)
+bpcaclust <- kmeans(pcadat[,1:3],6,10)
+clusts <- bpcaclust$cluster
+pcadat.clust <- data.frame(bandcdf.SP,clusts)
+write.csv(pcadat.clust,'bandcdfclust.csv',row.names = F)
+
+#HCA analysis
+data=bandcdf[,1:9]
+library(dplyr)
+# Sample a representative portion of your data (adjust ratio as needed)
+sample_ratio <- 0.02  # Sample 2% of the data due to memory allocation problem
+data_sample <- sample_n(data, size = nrow(data) * sample_ratio)
+# Use an approximate hierarchical clustering algorithm
+library(cluster)
+dist_method <- "euclidean"  #can adjust the distance metric here
+# Perform hierarchical clustering
+hc <- hclust(dist(data_sample), method = "single")
+#Visualize the dendogram
+plot(hc)
+# Assuming 'hc' contains the hierarchical clustering result
+# Cut the dendrogram into k clusters, adjust k as needed
+k <- 5
+cluster_labels <- cutree(hc, k = k)
+# Create a new data frame with original data and cluster labels
+data_with_clusters <- cbind(data_sample, Cluster = cluster_labels)
+# Store data with cluster labels in a CSV file
+write.csv(data_with_clusters, file = "clustered_data.csv", row.names = FALSE)
